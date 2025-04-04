@@ -36,6 +36,8 @@ from transformers.utils import (
 )
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
+from chronos.nn.mlr import MLRAttention
+
 if is_torch_flex_attn_available():
     from torch.nn.attention.flex_attention import BlockMask
     from transformers.integrations.flex_attention import make_flex_block_causal_mask
@@ -555,7 +557,24 @@ class T5Attention(nn.Module):
         return outputs
 
 
-class T5MLRAttention(T5Attention):
+class T5MLRAtt(T5Attention):
+    def __init__(
+        self,
+        config: T5Config,
+        has_relative_attention_bias=False,
+        layer_idx: Optional[int] = None,
+    ):
+        super().__init__(config=config, has_relative_attention_bias=has_relative_attention_bias, layer_idx=layer_idx)
+        self.mlr_attn = MLRAttention(
+            d_model=config.d_model,
+            n_head=config.num_heads,
+            seq_len=config.seq_len,
+            ranks=config.ranks,
+            block_szs=config.block_szs,
+            dropout=config.dropout_rate,
+            use_bias=has_relative_attention_bias,
+        )
+
     def forward(
         self,
         hidden_states,
@@ -569,6 +588,9 @@ class T5MLRAttention(T5Attention):
         output_attentions=False,
         cache_position=None,
     ):
+        """
+        Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
+        """
         # Input is (batch_size, seq_length, dim)
         # Mask is (batch_size, 1, 1, key_length) (non-causal encoder) or (batch_size, 1, seq_length, key_length) (causal decoder)
         batch_size, seq_length = hidden_states.shape[:2]
@@ -654,6 +676,8 @@ class T5MLRAttention(T5Attention):
         attn_output = attn_output.view(batch_size, -1, self.inner_dim)
         attn_output = self.o(attn_output)
 
+        attn_output = self.mlr_attn(hidden_states)
+
         outputs = (attn_output, past_key_value, position_bias)
 
         if output_attentions:
@@ -664,7 +688,7 @@ class T5MLRAttention(T5Attention):
 class T5LayerSelfAttention(nn.Module):
     def __init__(self, config, has_relative_attention_bias=False, layer_idx: Optional[int] = None):
         super().__init__()
-        self.SelfAttention = T5MLRAttention(
+        self.SelfAttention = T5MLRAtt(
             config, has_relative_attention_bias=has_relative_attention_bias, layer_idx=layer_idx
         )
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
@@ -700,7 +724,7 @@ class T5LayerSelfAttention(nn.Module):
 class T5LayerCrossAttention(nn.Module):
     def __init__(self, config, layer_idx: Optional[int] = None):
         super().__init__()
-        self.EncDecAttention = T5MLRAttention(config, has_relative_attention_bias=False, layer_idx=layer_idx)
+        self.EncDecAttention = T5MLRAtt(config, has_relative_attention_bias=False, layer_idx=layer_idx)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -929,7 +953,7 @@ class T5PreTrainedModel(PreTrainedModel):
             module.wo.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_ff) ** -0.5))
             if hasattr(module.wo, "bias") and module.wo.bias is not None:
                 module.wo.bias.data.zero_()
-        elif isinstance(module, T5Attention) or isinstance(module, T5MLRAttention):
+        elif isinstance(module, T5Attention) or isinstance(module, T5MLRAtt):
             # Mesh TensorFlow attention initialization to avoid scaling before softmax
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/attention.py#L136
             d_model = self.config.d_model

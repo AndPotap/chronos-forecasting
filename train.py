@@ -28,6 +28,9 @@ app = typer.Typer(pretty_exceptions_enable=False)
 
 
 def load_model(
+    seq_len,
+    ranks,
+    block_szs,
     vocab_size=4096,
     tie_embeddings=False,
     pad_token_id=0,
@@ -35,10 +38,14 @@ def load_model(
 ):
     ModelClass = T5ForConditionalGeneration
     log_on_main("Using random initialization", logger)
-    config = T5Config(initializer_factor=0.05)
+    config = T5Config(
+        initializer_factor=0.05,
+        seq_len=seq_len,
+        ranks=ranks,
+        block_szs=block_szs,
+    )
     config.decoder_start_token_id = pad_token_id
     config.tie_word_embeddings = tie_embeddings
-    # model = ModelClass._from_config(config)
     model = ModelClass(config)
 
     model.resize_token_embeddings(vocab_size)
@@ -52,6 +59,8 @@ def load_model(
 @use_yaml_config(param_name="config")
 def main(
     training_data_paths: str,
+    ranks: str,
+    block_szs: str,
     probability: Optional[str] = None,
     context_length: int = 512,
     prediction_length: int = 64,
@@ -134,15 +143,9 @@ def main(
     output_dir = get_next_path("run", base_dir=output_dir, file_type="")
 
     log_on_main(f"Logging dir: {output_dir}", logger)
-    log_on_main(
-        f"Loading and filtering {len(training_data_paths)} datasets for training: {training_data_paths}",
-        logger,
-    )
-
-    log_on_main(
-        f"Mixing probabilities: {probability}",
-        logger,
-    )
+    text = f"Loading and filtering {len(training_data_paths)} datasets for training: {training_data_paths}"
+    log_on_main(text, logger)
+    log_on_main(f"Mixing probabilities: {probability}", logger)
 
     train_datasets = [
         Filter(
@@ -159,6 +162,9 @@ def main(
     log_on_main("Initializing model", logger)
 
     model = load_model(
+        seq_len=context_length + 1,
+        ranks=ranks,
+        block_szs=block_szs,
         vocab_size=n_tokens,
         tie_embeddings=tie_embeddings,
         pad_token_id=pad_token_id,

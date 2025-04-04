@@ -1,8 +1,12 @@
 training_data_paths:
+- "./datasets/tsmixup-data.arrow"
 - "./datasets/kernelsynth-data.arrow"
 probability:
-- 1.0
-context_length: 512
+- 0.9
+- 0.1
+ranks: "32|8|6|4|4|4|4|2"
+block_szs: "default"
+context_length: 511
 prediction_length: 64
 min_past: 60
 max_steps: 2_000
