@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 import argparse
 import functools
 from pathlib import Path
@@ -79,9 +76,7 @@ def random_binary_map(a: Kernel, b: Kernel):
     return np.random.choice(binary_maps)(a, b)
 
 
-def sample_from_gp_prior(
-    kernel: Kernel, X: np.ndarray, random_seed: Optional[int] = None
-):
+def sample_from_gp_prior(kernel: Kernel, X: np.ndarray, random_seed: Optional[int] = None):
     """
     Draw a sample from a GP prior.
 
@@ -141,9 +136,7 @@ def sample_from_gp_prior_efficient(
     assert X.ndim == 2
 
     cov = kernel(X)
-    ts = np.random.default_rng(seed=random_seed).multivariate_normal(
-        mean=np.zeros(X.shape[0]), cov=cov, method=method
-    )
+    ts = np.random.default_rng(seed=random_seed).multivariate_normal(mean=np.zeros(X.shape[0]), cov=cov, method=method)
 
     return ts
 
@@ -164,9 +157,7 @@ def generate_time_series(max_kernels: int = 5):
         X = np.linspace(0, 1, LENGTH)
 
         # Randomly select upto max_kernels kernels from the KERNEL_BANK
-        selected_kernels = np.random.choice(
-            KERNEL_BANK, np.random.randint(1, max_kernels + 1), replace=True
-        )
+        selected_kernels = np.random.choice(KERNEL_BANK, np.random.randint(1, max_kernels + 1), replace=True)
 
         # Combine the sampled kernels using random binary operators
         kernel = functools.reduce(random_binary_map, selected_kernels)
@@ -184,14 +175,13 @@ def generate_time_series(max_kernels: int = 5):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-N", "--num-series", type=int, default=1000_000)
+    parser.add_argument("-N", "--num-series", type=int, default=1_000_000)
     parser.add_argument("-J", "--max-kernels", type=int, default=5)
     args = parser.parse_args()
     path = Path(__file__).parent / "kernelsynth-data.arrow"
 
     generated_dataset = Parallel(n_jobs=-1)(
-        delayed(generate_time_series)(max_kernels=args.max_kernels)
-        for _ in tqdm(range(args.num_series))
+        delayed(generate_time_series)(max_kernels=args.max_kernels) for _ in tqdm(range(args.num_series))
     )
 
     ArrowWriter(compression="lz4").write_to_file(
