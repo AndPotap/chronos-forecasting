@@ -38,7 +38,6 @@ from transformers.utils.model_parallel_utils import assert_device_map, get_devic
 
 if is_torch_flex_attn_available():
     from torch.nn.attention.flex_attention import BlockMask
-
     from transformers.integrations.flex_attention import make_flex_block_causal_mask
 
 
@@ -369,9 +368,7 @@ class T5Attention(nn.Module):
     def prune_heads(self, heads):
         if len(heads) == 0:
             return
-        heads, index = find_pruneable_heads_and_indices(
-            heads, self.n_heads, self.key_value_proj_dim, self.pruned_heads
-        )
+        heads, index = find_pruneable_heads_and_indices(heads, self.n_heads, self.key_value_proj_dim, self.pruned_heads)
         # Prune linear layers
         self.q = prune_linear_layer(self.q, index)
         self.k = prune_linear_layer(self.k, index)
@@ -558,10 +555,116 @@ class T5Attention(nn.Module):
         return outputs
 
 
+class T5MLRAttention(T5Attention):
+    def forward(
+        self,
+        hidden_states,
+        mask=None,
+        key_value_states=None,
+        position_bias=None,
+        past_key_value=None,
+        layer_head_mask=None,
+        query_length=None,
+        use_cache=False,
+        output_attentions=False,
+        cache_position=None,
+    ):
+        # Input is (batch_size, seq_length, dim)
+        # Mask is (batch_size, 1, 1, key_length) (non-causal encoder) or (batch_size, 1, seq_length, key_length) (causal decoder)
+        batch_size, seq_length = hidden_states.shape[:2]
+
+        # if key_value_states are provided this layer is used as a cross-attention layer for the decoder
+        is_cross_attention = key_value_states is not None
+
+        query_states = self.q(hidden_states)
+        query_states = query_states.view(batch_size, -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
+
+        if past_key_value is not None:
+            is_updated = past_key_value.is_updated.get(self.layer_idx)
+            if is_cross_attention:
+                # after the first generated id, we can subsequently re-use all key/value_states from cache
+                curr_past_key_value = past_key_value.cross_attention_cache
+            else:
+                curr_past_key_value = past_key_value.self_attention_cache
+
+        current_states = key_value_states if is_cross_attention else hidden_states
+        if is_cross_attention and past_key_value is not None and is_updated:
+            # reuse k,v, cross_attentions
+            key_states = curr_past_key_value.key_cache[self.layer_idx]
+            value_states = curr_past_key_value.value_cache[self.layer_idx]
+        else:
+            key_states = self.k(current_states)
+            value_states = self.v(current_states)
+            key_states = key_states.view(batch_size, -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
+            value_states = value_states.view(batch_size, -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
+
+            if past_key_value is not None:
+                # save all key/value_states to cache to be re-used for fast auto-regressive generation
+                cache_position = cache_position if not is_cross_attention else None
+                key_states, value_states = curr_past_key_value.update(
+                    key_states, value_states, self.layer_idx, {"cache_position": cache_position}
+                )
+                # set flag that curr layer for cross-attn is already updated so we can re-use in subsequent calls
+                if is_cross_attention:
+                    past_key_value.is_updated[self.layer_idx] = True
+
+        # compute scores, equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
+        scores = torch.matmul(query_states, key_states.transpose(3, 2))
+
+        if position_bias is None:
+            key_length = key_states.shape[-2]
+            # cache position is 0-indexed so we add 1 to get the real length of queries (aka with past)
+            real_seq_length = query_length if query_length is not None else cache_position[-1] + 1
+            if not self.has_relative_attention_bias:
+                position_bias = torch.zeros(
+                    (1, self.n_heads, seq_length, key_length), device=scores.device, dtype=scores.dtype
+                )
+                if self.gradient_checkpointing and self.training:
+                    position_bias.requires_grad = True
+            else:
+                position_bias = self.compute_bias(
+                    real_seq_length, key_length, device=scores.device, cache_position=cache_position
+                )
+                position_bias = position_bias[:, :, -seq_length:, :]
+
+            if mask is not None:
+                causal_mask = mask[:, :, :, : key_states.shape[-2]]
+                position_bias = position_bias + causal_mask
+
+        if self.pruned_heads:
+            mask = torch.ones(position_bias.shape[1])
+            mask[list(self.pruned_heads)] = 0
+            position_bias_masked = position_bias[:, mask.bool()]
+        else:
+            position_bias_masked = position_bias
+
+        scores += position_bias_masked
+
+        # (batch_size, n_heads, seq_length, key_length)
+        attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+
+        # Mask heads if we want to
+        if layer_head_mask is not None:
+            attn_weights = attn_weights * layer_head_mask
+
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, -1, self.inner_dim)
+        attn_output = self.o(attn_output)
+
+        outputs = (attn_output, past_key_value, position_bias)
+
+        if output_attentions:
+            outputs = outputs + (attn_weights,)
+        return outputs
+
+
 class T5LayerSelfAttention(nn.Module):
     def __init__(self, config, has_relative_attention_bias=False, layer_idx: Optional[int] = None):
         super().__init__()
-        self.SelfAttention = T5Attention(
+        self.SelfAttention = T5MLRAttention(
             config, has_relative_attention_bias=has_relative_attention_bias, layer_idx=layer_idx
         )
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
@@ -597,7 +700,7 @@ class T5LayerSelfAttention(nn.Module):
 class T5LayerCrossAttention(nn.Module):
     def __init__(self, config, layer_idx: Optional[int] = None):
         super().__init__()
-        self.EncDecAttention = T5Attention(config, has_relative_attention_bias=False, layer_idx=layer_idx)
+        self.EncDecAttention = T5MLRAttention(config, has_relative_attention_bias=False, layer_idx=layer_idx)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -826,7 +929,7 @@ class T5PreTrainedModel(PreTrainedModel):
             module.wo.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_ff) ** -0.5))
             if hasattr(module.wo, "bias") and module.wo.bias is not None:
                 module.wo.bias.data.zero_()
-        elif isinstance(module, T5Attention):
+        elif isinstance(module, T5Attention) or isinstance(module, T5MLRAttention):
             # Mesh TensorFlow attention initialization to avoid scaling before softmax
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/attention.py#L136
             d_model = self.config.d_model
@@ -1050,9 +1153,7 @@ class T5Stack(T5PreTrainedModel):
             encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             if encoder_attention_mask is None:
-                encoder_attention_mask = torch.ones(
-                    encoder_hidden_shape, device=inputs_embeds.device, dtype=torch.long
-                )
+                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=inputs_embeds.device, dtype=torch.long)
             encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
         else:
             encoder_extended_attention_mask = None
@@ -1294,9 +1395,7 @@ class T5Stack(T5PreTrainedModel):
             causal_mask = attention_mask
         else:
             min_dtype = torch.finfo(dtype).min
-            causal_mask = torch.full(
-                (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
-            )
+            causal_mask = torch.full((sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device)
             if sequence_length != 1:
                 causal_mask = torch.triu(causal_mask, diagonal=1)
             causal_mask *= torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
@@ -2499,4 +2598,3 @@ __all__ = [
     "T5ForSequenceClassification",
     "T5ForTokenClassification",
 ]
-
