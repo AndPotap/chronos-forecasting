@@ -134,15 +134,9 @@ def main(
     output_dir = get_next_path("run", base_dir=output_dir, file_type="")
 
     log_on_main(f"Logging dir: {output_dir}", logger)
-    log_on_main(
-        f"Loading and filtering {len(training_data_paths)} datasets for training: {training_data_paths}",
-        logger,
-    )
-
-    log_on_main(
-        f"Mixing probabilities: {probability}",
-        logger,
-    )
+    text = f"Loading and filtering {len(training_data_paths)} datasets for training: {training_data_paths}"
+    log_on_main(text, logger)
+    log_on_main(f"Mixing probabilities: {probability}", logger)
 
     train_datasets = [
         Filter(
