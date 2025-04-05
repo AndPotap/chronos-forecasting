@@ -39,7 +39,7 @@ class MLRAttention(nn.Module):
         assert sum(self.ranks) == d_model // n_head
         for bdx, curr_rank in zip(self.block_szs, self.ranks):
             assert self.seq_len % bdx == 0
-            assert bdx >= curr_rank
+            assert bdx >= curr_rank, f"{bdx} < {curr_rank}"
 
         self.c_attn = nn.Linear(d_model, 3 * d_model, bias=use_bias)
         self.c_proj = nn.Linear(d_model, d_model, bias=use_bias)

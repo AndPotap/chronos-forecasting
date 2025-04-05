@@ -4,8 +4,9 @@ training_data_paths:
 probability:
 - 0.9
 - 0.1
-context_length: 511
-prediction_length: 64
+wandb: true
+context_length: 127
+prediction_length: 127
 min_past: 60
 max_steps: 2_000
 save_steps: 1_000

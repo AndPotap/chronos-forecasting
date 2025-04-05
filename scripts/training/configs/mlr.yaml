@@ -4,10 +4,11 @@ training_data_paths:
 probability:
 - 0.9
 - 0.1
-ranks: "32|8|6|4|4|4|4|2"
+wandb: true
+ranks: "32|10|8|4|4|4|2"
 block_szs: "default"
-context_length: 511
-prediction_length: 64
+context_length: 127
+prediction_length: 127
 min_past: 60
 max_steps: 2_000
 save_steps: 1_000
@@ -24,7 +25,7 @@ random_init: true
 tie_embeddings: true
 output_dir: ./output/
 tf32: false
-torch_compile: true
+torch_compile: false
 tokenizer_class: "MeanScaleUniformBins"
 tokenizer_kwargs:
   low_limit: -15.0
