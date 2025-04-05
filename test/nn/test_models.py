@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from transformers import T5Config
+from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration as T5ForC
 
 from chronos.nn.mlr import LayerNorm, MLRAttention
 from chronos.nn.t5 import T5ForConditionalGeneration
@@ -47,18 +48,45 @@ def test_mlr():
     assert diff < 1e-8
 
 
-def test_t5():
+def test_t5_attn_equiv():
+    B, N = 13, 20
+    vocab_size, pad_token_id, eos_token_id = 4096, 0, 1
     config = T5Config(initializer_factor=0.05)
-    model = T5ForConditionalGeneration(config)
-    vocab_size = 4096
-    pad_token_id = 0
-    eos_token_id = 1
-    model.resize_token_embeddings(vocab_size)
-    model.config.pad_token_id = model.generation_config.pad_token_id = pad_token_id
-    model.config.eos_token_id = model.generation_config.eos_token_id = eos_token_id
-    bz, N = 13, 20
-    x = torch.randint(low=0, high=vocab_size, size=(bz, N))
-    y = model(x, decoder_input_ids=x)
+    x = torch.randint(low=0, high=vocab_size, size=(B, N))
+
+    t5 = T5ForConditionalGeneration(config)
+    t5.resize_token_embeddings(vocab_size)
+    t5.config.pad_token_id = t5.generation_config.pad_token_id = pad_token_id
+    t5.config.eos_token_id = t5.generation_config.eos_token_id = eos_token_id
+
+    t5_actual = T5ForC(config)
+    t5_actual.resize_token_embeddings(vocab_size)
+    t5_actual.config.pad_token_id = t5_actual.generation_config.pad_token_id = pad_token_id
+    t5_actual.config.eos_token_id = t5_actual.generation_config.eos_token_id = eos_token_id
+
+    t5_actual.load_state_dict(t5.state_dict())
+    t5.eval()
+    t5_actual.eval()
+
+    approx = t5(x, decoder_input_ids=x)["logits"]
+    soln = t5_actual(x, decoder_input_ids=x)["logits"]
+    diff = torch.linalg.norm(approx - soln) / torch.linalg.norm(soln)
+    print(f"{diff=:.3e}")
+    assert diff < 1e-8
+
+
+def test_t5():
+    B, N = 13, 20
+    vocab_size, pad_token_id, eos_token_id = 4096, 0, 1
+    config = T5Config(initializer_factor=0.05)
+    torch.manual_seed(seed=21)
+    t5 = T5ForConditionalGeneration(config)
+    t5.resize_token_embeddings(vocab_size)
+    t5.config.pad_token_id = t5.generation_config.pad_token_id = pad_token_id
+    t5.config.eos_token_id = t5.generation_config.eos_token_id = eos_token_id
+
+    x = torch.randint(low=0, high=vocab_size, size=(B, N))
+    y = t5(x, decoder_input_ids=x)
     assert y is not None
 
 
